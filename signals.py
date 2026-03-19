@@ -341,6 +341,17 @@ class SignalEngine:
         bc    = (ph + pl) / 2
         tc    = (pivot - bc) + pivot
         dr    = ph - pl
+
+        # v1.1.1 — TC < BC when the prior day closed below its range midpoint
+        # (bearish session: PDC < (PDH+PDL)/2). In that case tc and bc are
+        # mathematically correct values but the labels are inverted. Swap them
+        # so TC is always the top of the CPR band. The pivot is unaffected.
+        # This ensures _validate_cpr_levels always passes for real market data,
+        # and the CPR bias filter (which only uses `pivot`) is never skipped.
+        if tc < bc:
+            tc, bc = bc, tc
+            log.debug("CPR TC/BC swapped — bearish prior-day close (PDC=%.2f < mid=%.2f)", pc, (ph+pl)/2)
+
         lv = {
             "pivot":         round(pivot, 2),
             "tc":            round(tc, 2),
@@ -353,6 +364,16 @@ class SignalEngine:
             "pdl":           round(pl, 2),
             "cpr_width_pct": round(abs(tc - bc) / pivot * 100, 3),
         }
+
+        # Sanity check — should always pass after the swap above.
+        # If it fails something unexpected happened with the candle data.
+        ok, reason = _validate_cpr_levels(lv)
+        if not ok:
+            log.warning("CPR validation failed after swap — skipping CPR bias | %s | "
+                        "PDH=%.2f PDL=%.2f PDC=%.2f → pivot=%.2f TC=%.2f BC=%.2f",
+                        reason, ph, pl, pc, pivot, tc, bc)
+            return None, None, None, None, None
+
         log.info("CPR fetched | pivot=%.2f TC=%.2f BC=%.2f width=%.3f%%",
                  pivot, tc, bc, lv["cpr_width_pct"])
         return lv, lv["pivot"], lv["tc"], lv["bc"], lv["cpr_width_pct"]

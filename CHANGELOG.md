@@ -2,6 +2,39 @@
 
 ---
 
+## v1.1.1 — 2026-03-19
+
+### 🐛 Bug Fix — CPR TC/BC Inversion (`signals.py`)
+
+**Problem found in logs:** `CPR fetched | pivot=5008.12 TC=5006.94 BC=5009.31`
+TC was less than BC, violating the CPR convention (Top Central Pivot must be
+above Bottom Central Pivot).
+
+**Root cause:** When the prior day closes *below* its high-low midpoint
+(bearish session), the formula `TC = 2×pivot − BC` produces `TC < BC`.
+Mathematically the values are correct, but the labels are inverted.
+
+**What was happening (v1.1):** The CPR cache validation only ran on the stale
+cache read path (which was removed in v1.1). On the fresh-fetch path there was
+no validation at all — inverted TC/BC values were silently passed to the bias
+filter. This had no effect on scoring (which only uses `pivot`), but the
+`cpr_width_pct` and `TC`/`BC` log values were misleading.
+
+**Fix:** After computing TC and BC, swap them if TC < BC:
+```python
+if tc < bc:
+    tc, bc = bc, tc  # bearish prior-day close — re-label top/bottom
+```
+TC is now always the top of the CPR band. Pivot is unchanged. The structural
+validation (`_validate_cpr_levels`) now runs as a post-swap sanity check and
+will only fail if candle data is genuinely corrupt or degenerate
+(zero-width CPR, which has ~1/5000 probability per day with real XAU/USD data).
+
+**Impact:** Cosmetic in v1.1 (scoring was unaffected). In v1.1.1 the fix ensures
+`TC`, `BC`, and `cpr_width_pct` in logs and Telegram alerts are always correct.
+
+---
+
 ## v1.1 — 2026-03-19
 
 ### 🔓 Caps & Limits Removed
