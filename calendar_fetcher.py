@@ -29,8 +29,7 @@ SGT = pytz.timezone("Asia/Singapore")
 CACHE_PATH = CALENDAR_CACHE_FILE
 FF_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 NEXT_WEEK_URL = "https://nfs.faireconomy.media/ff_calendar_nextweek.json"
-# v1.2: alternate next-week URL tried when primary 404s on Thu/Fri/weekend
-NEXT_WEEK_URL_ALT = "https://cdn-nfs.faireconomy.media/ff_calendar_nextweek.json"
+# Note: alternate CDN (cdn-nfs.faireconomy.media) does not resolve — removed in v1.2.4
 
 GOLD_KEYWORDS = [
     "fomc", "fed", "powell", "cpi", "pce",
@@ -293,22 +292,13 @@ def run_fetch() -> bool:
         return False
 
     today_weekday = now.weekday()
-    # Suppress next-week 404 Mon–Wed (0,1,2) — feed is not published until Thu/Fri.
-    # On Thu (3), Fri (4), and weekends (5,6) the feed SHOULD be up, so don't suppress.
-    suppress_nextweek_404 = today_weekday < 3
+    # v1.2.4: suppress next-week 404 on all weekdays (Mon–Fri).
+    # The feed is only reliably published on weekends. The alternate CDN
+    # (cdn-nfs.faireconomy.media) was confirmed unreachable — removed.
+    suppress_nextweek_404 = today_weekday < 5  # Mon–Fri
 
     this_week, status_this = _fetch_ff_events(FF_URL)
     next_week, status_next = _fetch_ff_events(NEXT_WEEK_URL, suppress_404=suppress_nextweek_404)
-
-    # v1.2: if next-week primary URL returned 404 on a day we expect it to be live
-    # (Thu/Fri/weekend), try the alternate CDN URL before giving up.
-    if status_next == 404 and not suppress_nextweek_404:
-        log.info("Primary next-week URL 404 — trying alternate CDN.")
-        next_week_alt, status_next_alt = _fetch_ff_events(NEXT_WEEK_URL_ALT, suppress_404=True)
-        if next_week_alt:
-            next_week   = next_week_alt
-            status_next = status_next_alt
-            log.info("Alternate next-week CDN succeeded — %d events.", len(next_week))
 
     all_raw = this_week + next_week
 

@@ -287,13 +287,26 @@ class SignalEngine:
         position_usd = score_to_position_usd(score, settings)
 
         # -- 7. Scalp SL/TP ---------------------------------------------------
+        # v1.2.4 fix: respect tp_mode setting.
+        # When tp_mode="rr_multiple" (the default), TP = SL × rr_ratio.
+        # When tp_mode="scalp_pct" or any other value, TP = entry × tp_pct.
+        # Previously, TP was ALWAYS computed as entry × tp_pct, meaning
+        # tp_mode and rr_ratio were silently ignored — with sl_pct=0.0025 and
+        # tp_pct=0.0035 this gives RR=1.40 which always failed the RR≥2 check.
         entry        = current_close
         sl_pct_used  = float((settings or {}).get("sl_pct", SCALP_SL_PCT))
         tp_pct_used  = float((settings or {}).get("tp_pct", SCALP_TP_PCT))
         sl_usd_rec   = round(entry * sl_pct_used, 2)
-        tp_usd_rec   = round(entry * tp_pct_used, 2)
+
+        _tp_mode     = str((settings or {}).get("tp_mode", "rr_multiple")).lower()
+        _rr_ratio    = float((settings or {}).get("rr_ratio", 2.5))
+        if _tp_mode == "rr_multiple" and _rr_ratio > 0:
+            tp_usd_rec = round(sl_usd_rec * _rr_ratio, 2)
+            tp_source  = "rr_multiple"
+        else:
+            tp_usd_rec = round(entry * tp_pct_used, 2)
+            tp_source  = "scalp_pct"
         sl_source    = "scalp_pct"
-        tp_source    = "scalp_pct"
 
         rr_ratio  = (tp_usd_rec / sl_usd_rec) if sl_usd_rec > 0 else 0
         rr_skip   = rr_ratio < 2.0

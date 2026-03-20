@@ -16,6 +16,11 @@ DEFAULT_SETTINGS_PATH = BASE_DIR / 'settings.json'
 SETTINGS_FILE = DATA_DIR / 'settings.json'
 SECRETS_JSON_PATH = BASE_DIR / 'secrets.json'
 
+# v1.2.4: run-once guard — ensure_persistent_settings only syncs once per
+# process lifetime.  Previously it re-ran on every load_settings() call
+# because writing SETTINGS_FILE changed its mtime and invalidated the cache.
+_settings_synced: bool = False
+
 
 def _read_json(path: Path, default: Any = None) -> Any:
     try:
@@ -36,23 +41,31 @@ def _write_json(path: Path, payload: Any) -> None:
 
 
 def ensure_persistent_settings() -> Path:
+    global _settings_synced
+    if _settings_synced:
+        return SETTINGS_FILE  # already ran this process — skip
+
     # Always read the bundled defaults shipped with the code.
     default_settings = _read_json(DEFAULT_SETTINGS_PATH, {})
     if not isinstance(default_settings, dict):
         default_settings = {}
 
-    # v1.2.3 fix: ALWAYS overwrite the volume settings with the bundled
-    # settings.json on every startup.
-    #
-    # Previous approach (sync only when bot_name changes) was fragile:
-    # the first deployment writes the new bot_name to the volume, so all
-    # subsequent restarts see the same bot_name → no sync → stale values
-    # persist indefinitely (confirmed: max_losing_trades_day=3 survived
-    # multiple redeploys because the key already existed in the volume).
-    #
-    # For a Railway bot, the bundled settings.json IS the source of truth.
-    # The volume is for trade state (history, runtime state) — not config.
-    # Operators change settings by editing settings.json and redeploying.
+    # v1.2.4 safety: if the bundled settings.json couldn't be read (e.g. path
+    # resolution issue in some Railway container layouts), do NOT overwrite the
+    # volume with an empty dict.  Log a warning and leave the volume as-is so
+    # the bot continues to run with whatever is on the volume.
+    if not default_settings:
+        logger.warning(
+            'Bundled settings.json not found or empty at %s — '
+            'volume settings left unchanged.',
+            DEFAULT_SETTINGS_PATH,
+        )
+        _settings_synced = True
+        return SETTINGS_FILE
+
+    # v1.2.3/v1.2.4: ALWAYS overwrite the volume settings with the bundled
+    # settings.json on every startup (first time only per process).
+    # The Railway volume stores trade state — not configuration.
     if SETTINGS_FILE.exists():
         old_settings = _read_json(SETTINGS_FILE, {})
         old_name = old_settings.get('bot_name', 'unknown') if isinstance(old_settings, dict) else 'unknown'
@@ -60,6 +73,7 @@ def ensure_persistent_settings() -> Path:
         old_name = 'none'
 
     _write_json(SETTINGS_FILE, default_settings)
+    _settings_synced = True
     new_name = default_settings.get('bot_name', 'unknown')
     if old_name != new_name:
         logger.info('Settings synced on startup: %s → %s', old_name, new_name)

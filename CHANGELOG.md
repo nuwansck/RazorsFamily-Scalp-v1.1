@@ -2,6 +2,51 @@
 
 ---
 
+## v1.2.4 — 2026-03-20
+
+### 🔴 Critical Fix — Every Trade Blocked by R:R Check (`signals.py`)
+
+**Root cause (confirmed from log):** `signals.py` always computed TP as
+`entry × tp_pct`, completely ignoring `tp_mode` and `rr_ratio` from settings.
+With `sl_pct=0.0025` and `tp_pct=0.0035`, the computed RR was always
+`0.0035/0.0025 = 1.40` — which always failed the mandatory `R:R ≥ 2` check.
+Every single trade signal was silently blocked.
+
+**Evidence from log:** `Scalp signal BLOCKED | R:R 1.40 < 1:2` on all cycles.
+
+**Fix:** When `tp_mode = "rr_multiple"` (the default), TP is now correctly
+computed as `SL × rr_ratio` (= `11.61 × 2.5 = $29.03`, RR=2.50 ✅). The
+raw `tp_pct` path remains for any future `tp_mode = "scalp_pct"` usage.
+
+### 🔴 Fix — `ensure_persistent_settings` Fires 5× Per Startup (`config_loader.py`)
+
+**Root cause:** Writing `SETTINGS_FILE` on every call changed its `mtime`,
+invalidating the `load_settings` cache, causing the next `load_settings()`
+call to call `ensure_persistent_settings()` again — indefinitely. With 5
+`load_settings()` calls per startup cycle, the sync ran 5 times, writing the
+volume file 5 times and spamming the log with
+`Settings synced on startup: RF Scalp Bot → unknown` repeatedly.
+
+**Fix:** Added a module-level `_settings_synced` flag. Once
+`ensure_persistent_settings()` has run once in the process lifetime, all
+subsequent calls return immediately.
+
+### 🔴 Fix — Empty Bundled Settings Guard (`config_loader.py`)
+
+If `DEFAULT_SETTINGS_PATH` (`settings.json` next to `config_loader.py`)
+cannot be read (e.g. a container path layout issue), the function previously
+overwrote the volume with an empty `{}`. Now it logs a warning and leaves the
+volume file unchanged, so the bot continues with whatever is on the volume.
+
+### 🟡 Fix — Broken Alternate Calendar CDN Removed (`calendar_fetcher.py`)
+
+`cdn-nfs.faireconomy.media` does not resolve (confirmed `NameResolutionError`
+in log). The alternate CDN fallback was removed. Next-week 404s are now
+suppressed on all weekdays (Mon–Fri) since the feed isn't reliably published
+until the weekend anyway.
+
+---
+
 ## v1.2.3 — 2026-03-20
 
 ### 🔴 Bug Fix — Volume Settings Never Actually Updated on Railway (`config_loader.py`)
