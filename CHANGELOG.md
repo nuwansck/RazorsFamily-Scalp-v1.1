@@ -2,6 +2,105 @@
 
 ---
 
+## v1.2.1 — 2026-03-20
+
+### Cap Tuning for Scalp-Frequency Trading (`settings.json`)
+
+Updated all risk caps to match target scalping session density.
+No code logic was changed — purely configuration.
+
+| Setting                    | v1.2.0 | v1.2.1 | Note                          |
+|----------------------------|--------|--------|-------------------------------|
+| `max_trades_day`           | 8      | **20** | Higher throughput for scalping|
+| `max_trades_london`        | 4      | **10** | London window up to 10 trades |
+| `max_trades_us`            | 4      | **10** | US window up to 10 trades     |
+| `max_losing_trades_day`    | 4      | **8**  | 60% win-rate floor enforced   |
+| `max_losing_trades_session`| 2      | **4**  | Session loss cap widened      |
+| `loss_streak_cooldown_min` | 30     | 30     | Unchanged                     |
+| `sl_reentry_gap_min`       | 5      | 5      | Unchanged                     |
+| `breakeven_enabled`        | true   | **false** | Disabled per user config   |
+
+**Rationale:**
+- At RR=2.5 the mathematical breakeven win rate is only 28.6%, so the caps —
+  not the RR — are the active risk limiter. Widening them allows the strategy
+  to run more cycles and find higher-conviction setups across a full session.
+- Loss cooldown (30 min after 2 consecutive losses) and SL re-entry gap (5 min
+  after any SL hit) remain in place as the primary per-trade brakes.
+- Break-even disabled to avoid premature SL moves on volatile XAU/USD candles.
+
+### Minor Fix — US Window Telegram Label (`bot.py`)
+
+Session-open alert for `US Window` previously showed `00:00–00:59` only,
+missing the primary `21:00–23:59` slot. Corrected to `21:00–00:59`.
+
+---
+
+## v1.2.0 — 2026-03-20
+
+### 🔴 Critical Fix — Re-enable All Risk Guards (`bot.py`)
+
+**Problem:** v1.1 commented out three critical guards:
+- `max_losing_trades_day` daily loss hard-stop
+- `max_trades_day` daily trade hard-stop
+- `max_trades_london` / `max_trades_us` per-session window caps
+- `max_losing_trades_session` per-session loss sub-cap
+
+All four were marked "REMOVED" in code but still present in `settings.json`,
+creating a misleading configuration. With no guards active the bot executed
+7 losing trades in a single session, losing ~$59 before two wins recovered
+some ground.
+
+**Fix:** All four guards re-implemented in `prepare_trade_context()`.
+`daily_totals()` already computed the needed counters — the check blocks were
+simply restored and connected to their settings keys.
+
+### 🔴 New Feature — Single-Candle SL Re-entry Gap (`bot.py`)
+
+**Problem:** After every SL hit, the bot re-entered within 1–5 minutes into
+the same price zone. Trades 4→5 and 7→8 in the transaction CSV are examples
+— both were stopped out immediately.
+
+**Fix:** Added `sl_reentry_gap_min` setting (default 5 min). On every SL
+close `backfill_pnl()` writes `last_sl_closed_at_sgt` to runtime state.
+`prepare_trade_context()` checks this timestamp and blocks new entries until
+the gap has elapsed.
+
+### 🟡 Fix — ORB Breakout Wrongly Penalised by Exhaustion Filter (`signals.py`)
+
+**Problem:** At 16:16 SGT the London ORB formed and price broke out, but the
+exhaustion penalty dropped the score from 2 to 0 — blocking the trade. An ORB
+breakout *is* a stretch by definition; penalising it as "exhaustion noise"
+incorrectly filters the best entry of the day.
+
+**Fix:** Exhaustion penalty now skips when `orb_contributed=True` (i.e. ORB
+contributed +2 to the score). The penalty still fires on pure EMA setups.
+`exhaustion_atr_mult` also raised from 2.0 → 3.0 in settings.
+
+### 🟡 Fix — Widen Stop Loss (`settings.json`)
+
+`sl_pct` changed from `0.0015` (0.15%) to `0.0025` (0.25%).
+At $4600 gold this widens the stop from ~$6.9 to ~$11.5 — outside the typical
+5-minute candle wick range of XAU/USD. `sl_max_usd` raised from $8 to $15
+accordingly.
+
+### 🟡 Fix — Enable Breakeven (`settings.json`)
+
+`breakeven_enabled` set to `true`. Trigger raised from $3 → $5 so breakeven
+only fires when the trade has meaningful profit cushion.
+
+### 🟠 Fix — Calendar: Wider Gold Keywords + Alternate Next-Week URL (`calendar_fetcher.py`)
+
+- Added 16 new gold-relevant USD keywords: `jolts`, `initial jobless`,
+  `consumer confidence`, `michigan`, `yield`, `treasury`, `bond auction`,
+  etc.
+- `suppress_nextweek_404` now only suppresses Mon–Wed (days 0–2). On Thu/Fri
+  when FF *should* publish next-week data, a 404 triggers a retry against
+  `cdn-nfs.faireconomy.media` alternate URL.
+- `days_ahead` in `_prune_old_events` widened from 14 → 21 so next-week
+  events fetched early in the week survive the prune step.
+
+---
+
 ## v1.1.1 — 2026-03-19
 
 ### 🐛 Bug Fix — CPR TC/BC Inversion (`signals.py`)

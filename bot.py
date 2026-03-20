@@ -741,6 +741,14 @@ def backfill_pnl(history: list, trader, alert, settings: dict) -> list:
                     trade["closed_at_sgt"] = datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S")
                     changed = True
                     log.info("Back-filled P&L trade %s: $%.2f", trade_id, pnl)
+
+                    # v1.2 fix: record the timestamp of any SL-closed trade so
+                    # the single-candle re-entry gap guard can reference it.
+                    if pnl < 0:
+                        _rt = load_json(RUNTIME_STATE_FILE, {})
+                        _rt["last_sl_closed_at_sgt"] = trade["closed_at_sgt"]
+                        save_json(RUNTIME_STATE_FILE, _rt)
+
                     if not trade.get("closed_alert_sent"):
                         try:
                             _cp  = trade.get("tp_price") if pnl > 0 else trade.get("sl_price")
@@ -928,19 +936,21 @@ def _guard_phase(db, run_id, settings, alert, history, now_sgt, today, demo) -> 
         # Fire a session-open alert when entering a new trading window
         if session is not None:
             _hours_map = {
-                "US Window":     "00:00–00:59",
+                "US Window":     "21:00–00:59",
                 "London Window": "16:00–20:59",
             }
             _sess_hours = _hours_map.get(session, "")
             if _sess_hours:
                 _day_pnl_open, _day_cnt_open, _ = daily_totals(history, today)
+                _wk   = get_window_key(session)
+                _wcap = get_window_trade_cap(_wk, settings) or 0
                 send_once_per_state(
                     alert, ops,
                     "session_open_state", f"session_open:{session}:{today}",
                     msg_session_open(
                         session_name=session,
                         session_hours_sgt=_sess_hours,
-                        trade_cap=0,          # v1.1: window caps removed; 0 = unlimited
+                        trade_cap=_wcap,
                         trades_today=_day_cnt_open,
                         daily_pnl=_day_pnl_open,
                     ),
@@ -988,9 +998,137 @@ def _guard_phase(db, run_id, settings, alert, history, now_sgt, today, demo) -> 
             "penalty": news_penalty, "checked_at_sgt": now_sgt.strftime("%Y-%m-%d %H:%M:%S"),
         })
 
+    # ── Early cap guards (pre-login) ──────────────────────────────────────────
+    # All checks below use only local history / runtime state — no OANDA call
+    # needed. Keeping them here means capped/cooldown days never produce
+    # "OANDA | Mode: DEMO / Account: …" log noise on every cycle.
+
+    # Daily loss cap
+    _daily_pnl_pre, _daily_trades_pre, _daily_losses_pre = daily_totals(history, today)
+    _max_day_losses = int(settings.get("max_losing_trades_day", 4))
+    if _max_day_losses > 0 and _daily_losses_pre >= _max_day_losses:
+        msg = (
+            f"🛑 Daily loss cap reached ({_daily_losses_pre}/{_max_day_losses} losses) — "
+            f"no new entries today."
+        )
+        send_once_per_state(alert, ops, "ops_state", f"day_loss_cap:{today}:{_daily_losses_pre}", msg)
+        log.info(
+            "Daily loss cap hit (%d/%d) — skipping entry.",
+            _daily_losses_pre, _max_day_losses, extra={"run_id": run_id},
+        )
+        update_runtime_state(
+            last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"),
+            status="SKIPPED_DAILY_LOSS_CAP",
+        )
+        db.finish_cycle(run_id, status="SKIPPED", summary={"stage": "daily_loss_cap",
+                                                             "losses": _daily_losses_pre,
+                                                             "cap": _max_day_losses})
+        return None
+
+    # Daily trade cap
+    _max_day_trades = int(settings.get("max_trades_day", 8))
+    if _max_day_trades > 0 and _daily_trades_pre >= _max_day_trades:
+        msg = (
+            f"🛑 Daily trade cap reached ({_daily_trades_pre}/{_max_day_trades} trades) — "
+            f"no new entries today."
+        )
+        send_once_per_state(alert, ops, "ops_state", f"day_trade_cap:{today}:{_daily_trades_pre}", msg)
+        log.info(
+            "Daily trade cap hit (%d/%d) — skipping entry.",
+            _daily_trades_pre, _max_day_trades, extra={"run_id": run_id},
+        )
+        update_runtime_state(
+            last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"),
+            status="SKIPPED_DAILY_TRADE_CAP",
+        )
+        db.finish_cycle(run_id, status="SKIPPED", summary={"stage": "daily_trade_cap",
+                                                             "trades": _daily_trades_pre,
+                                                             "cap": _max_day_trades})
+        return None
+
+    # Per-window trade cap
+    _window_key = get_window_key(session)
+    _window_cap = get_window_trade_cap(_window_key, settings)
+    if _window_key and _window_cap is not None:
+        _window_trades = window_trade_count(history, today, _window_key)
+        if _window_trades >= _window_cap:
+            msg = (
+                f"⏸️ {session} trade cap reached "
+                f"({_window_trades}/{_window_cap}) — no more entries this window."
+            )
+            send_once_per_state(
+                alert, ops, "window_cap_state",
+                f"window_cap:{_window_key}:{today}:{_window_trades}", msg,
+            )
+            log.info(
+                "Window cap hit for %s (%d/%d) — skipping.",
+                _window_key, _window_trades, _window_cap, extra={"run_id": run_id},
+            )
+            update_runtime_state(
+                last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"),
+                status="SKIPPED_WINDOW_CAP",
+            )
+            db.finish_cycle(run_id, status="SKIPPED", summary={"stage": "window_cap",
+                                                                 "window": _window_key,
+                                                                 "trades": _window_trades,
+                                                                 "cap": _window_cap})
+            return None
+
+    # Per-session loss sub-cap
+    if macro:
+        _sess_loss_cap = int(settings.get("max_losing_trades_session", 2))
+        _sess_losses   = session_losses(history, today, macro)
+        if _sess_loss_cap > 0 and _sess_losses >= _sess_loss_cap:
+            msg = (
+                f"🛑 {session or macro} session loss cap reached "
+                f"({_sess_losses}/{_sess_loss_cap} losses) — "
+                f"no more entries this window."
+            )
+            send_once_per_state(
+                alert, ops, "session_loss_cap_state",
+                f"sess_loss_cap:{macro}:{today}:{_sess_losses}", msg,
+            )
+            log.info(
+                "Session loss cap hit for %s (%d/%d) — skipping.",
+                macro, _sess_losses, _sess_loss_cap, extra={"run_id": run_id},
+            )
+            update_runtime_state(
+                last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"),
+                status="SKIPPED_SESSION_LOSS_CAP",
+            )
+            db.finish_cycle(run_id, status="SKIPPED", summary={"stage": "session_loss_cap",
+                                                                 "session": macro,
+                                                                 "losses": _sess_losses,
+                                                                 "cap": _sess_loss_cap})
+            return None
+
+    # Single-candle SL re-entry gap
+    _sl_gap_min = int(settings.get("sl_reentry_gap_min", 5))
+    if _sl_gap_min > 0:
+        _last_sl_at = load_json(RUNTIME_STATE_FILE, {}).get("last_sl_closed_at_sgt")
+        if _last_sl_at:
+            _last_sl_dt = _parse_sgt_timestamp(_last_sl_at)
+            if _last_sl_dt and (now_sgt - _last_sl_dt).total_seconds() < _sl_gap_min * 60:
+                _remaining_sl = max(1, int((_sl_gap_min * 60 - (now_sgt - _last_sl_dt).total_seconds()) // 60))
+                msg = f"⏳ SL cooldown — waiting {_remaining_sl} more min before next entry."
+                send_once_per_state(
+                    alert, ops, "sl_reentry_state",
+                    f"sl_gap:{_last_sl_at}", msg,
+                )
+                log.info(
+                    "SL re-entry gap active (last SL at %s, gap=%dmin) — skipping.",
+                    _last_sl_at, _sl_gap_min, extra={"run_id": run_id},
+                )
+                update_runtime_state(
+                    last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"),
+                    status="SKIPPED_SL_REENTRY_GAP",
+                )
+                db.finish_cycle(run_id, status="SKIPPED", summary={"stage": "sl_reentry_gap"})
+                return None
+
     # ── Lazy OandaTrader construction + circuit breaker ───────────────────────
-    # Only constructed here — after the early loss-cap guard — so cooldown days
-    # never produce "OANDA | Mode: DEMO / Account: ..." noise in every cycle.
+    # Constructed after all pre-login cap guards so capped/cooldown days never
+    # produce "OANDA | Mode: DEMO / Account: …" noise in every cycle.
     #
     # Circuit breaker: if login_with_summary() has been failing consecutively,
     # suppress per-cycle error alerts and only re-alert every 12 failures (~1 hour).
@@ -1034,14 +1172,14 @@ def _guard_phase(db, run_id, settings, alert, history, now_sgt, today, demo) -> 
     # Backfill PnL for any FILLED trades missing realized_pnl. Requires an
     # active OANDA connection — placed here after login so trader is available.
     # Break-even SL mover is intentionally disabled: SL is fixed at 0.25% via
-    # pct_based mode and does not move after entry. (`breakeven_enabled: false`)
+    # pct_based mode and does not move after entry.
     history[:] = backfill_pnl(history, trader, alert, settings)
     if settings.get("breakeven_enabled", False):
         check_breakeven(history, trader, alert, settings)
 
-    # ── Daily caps REMOVED ─────────────────────────────────────────────────────
-    # max_losing_trades_day and max_trades_day hard-stops are disabled.
-    # daily_pnl/daily_trades still computed for reference by other code.
+    # Post-login guards: these need an active trader connection.
+    # daily_totals here includes unrealized P&L from any open position so the
+    # cap fires before the trade closes (avoids one-cycle overshoot).
     daily_pnl, daily_trades, daily_losses = daily_totals(history, today, trader=trader)
 
     cooldown_until = active_cooldown_until(now_sgt)
@@ -1052,12 +1190,6 @@ def _guard_phase(db, run_id, settings, alert, history, now_sgt, today, demo) -> 
         update_runtime_state(last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"), status="SKIPPED_COOLDOWN")
         db.finish_cycle(run_id, status="SKIPPED", summary={"stage": "cooldown_guard"})
         return None
-
-    # ── Window cap REMOVED ─────────────────────────────────────────────────────
-    # max_trades_london / max_trades_us per-session trade caps are disabled.
-
-    # ── Per-session loss sub-cap REMOVED ──────────────────────────────────────
-    # max_losing_trades_session (2-loss per session limit) is disabled.
 
     open_count     = trader.get_open_trades_count(INSTRUMENT)
     max_concurrent = int(settings.get("max_concurrent_trades", 1))

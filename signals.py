@@ -255,8 +255,16 @@ class SignalEngine:
             reasons.append("CPR bias against direction (pivot={:.2f}) (+0)".format(pivot))
 
         # 5d. Exhaustion penalty ----------------------------------------------
-        _exhaust_mult = float((settings or {}).get("exhaustion_atr_mult", 2.0))
-        if _exhaust_mult > 0 and atr_val and atr_val > 0:
+        # v1.2 fix: skip exhaustion penalty when an ORB break contributed +2 to
+        # the score. An ORB breakout by definition stretches price — penalising
+        # it as "exhaustion" incorrectly zeroes out the best entries of the day.
+        # The penalty still fires on EMA-only setups where stretch IS a concern.
+        _orb_contributed = orb_formed and (
+            (direction == "BUY"  and orb_high and current_close > orb_high) or
+            (direction == "SELL" and orb_low  and current_close < orb_low)
+        )
+        _exhaust_mult = float((settings or {}).get("exhaustion_atr_mult", 3.0))
+        if _exhaust_mult > 0 and atr_val and atr_val > 0 and not _orb_contributed:
             ema_mid  = (ema_fast_now + ema_slow_now) / 2
             _stretch = abs(current_close - ema_mid) / atr_val
             if _stretch > _exhaust_mult:
@@ -270,6 +278,10 @@ class SignalEngine:
                 reasons.append(
                     "Stretch {:.2f}x ATR (ok, no exhaustion penalty)".format(_stretch)
                 )
+        elif _orb_contributed:
+            reasons.append(
+                "Exhaustion check skipped — ORB breakout in progress (stretch not penalised)"
+            )
 
         # -- 6. Position size -------------------------------------------------
         position_usd = score_to_position_usd(score, settings)

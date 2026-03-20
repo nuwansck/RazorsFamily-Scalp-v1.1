@@ -29,6 +29,8 @@ SGT = pytz.timezone("Asia/Singapore")
 CACHE_PATH = CALENDAR_CACHE_FILE
 FF_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 NEXT_WEEK_URL = "https://nfs.faireconomy.media/ff_calendar_nextweek.json"
+# v1.2: alternate next-week URL tried when primary 404s on Thu/Fri/weekend
+NEXT_WEEK_URL_ALT = "https://cdn-nfs.faireconomy.media/ff_calendar_nextweek.json"
 
 GOLD_KEYWORDS = [
     "fomc", "fed", "powell", "cpi", "pce",
@@ -37,6 +39,15 @@ GOLD_KEYWORDS = [
     "interest rate", "monetary policy",
     "gdp", "retail sales", "durable goods",
     "ism", "pmi",
+    # v1.2: additional keywords that historically move gold
+    "jolts", "initial jobless", "continuing claims",
+    "treasury", "bond auction", "10-year", "10 year",
+    "consumer confidence", "consumer sentiment",
+    "michigan", "empire state", "philly fed",
+    "trade balance", "current account",
+    "housing starts", "building permits",
+    "factory orders", "industrial production",
+    "inflation", "deflation", "yield",
 ]
 
 
@@ -282,10 +293,23 @@ def run_fetch() -> bool:
         return False
 
     today_weekday = now.weekday()
-    suppress_nextweek_404 = today_weekday < 5  # suppress Mon–Fri (404 expected until weekend publish)
+    # Suppress next-week 404 Mon–Wed (0,1,2) — feed is not published until Thu/Fri.
+    # On Thu (3), Fri (4), and weekends (5,6) the feed SHOULD be up, so don't suppress.
+    suppress_nextweek_404 = today_weekday < 3
 
     this_week, status_this = _fetch_ff_events(FF_URL)
     next_week, status_next = _fetch_ff_events(NEXT_WEEK_URL, suppress_404=suppress_nextweek_404)
+
+    # v1.2: if next-week primary URL returned 404 on a day we expect it to be live
+    # (Thu/Fri/weekend), try the alternate CDN URL before giving up.
+    if status_next == 404 and not suppress_nextweek_404:
+        log.info("Primary next-week URL 404 — trying alternate CDN.")
+        next_week_alt, status_next_alt = _fetch_ff_events(NEXT_WEEK_URL_ALT, suppress_404=True)
+        if next_week_alt:
+            next_week   = next_week_alt
+            status_next = status_next_alt
+            log.info("Alternate next-week CDN succeeded — %d events.", len(next_week))
+
     all_raw = this_week + next_week
 
     if status_this == 429 or status_next == 429:
@@ -329,7 +353,7 @@ def run_fetch() -> bool:
 
     existing = _load_existing_cache()
     merged = _deduplicate(parsed + existing)
-    pruned = _prune_old_events(merged, days_ahead=14)
+    pruned = _prune_old_events(merged, days_ahead=21)
     pruned.sort(key=lambda e: e.get("time_sgt", ""))
 
     # Atomic write — consistent with all other state file writes in this codebase
@@ -340,7 +364,7 @@ def run_fetch() -> bool:
     state.pop("calendar_next_allowed_fetch_sgt", None)
     _save_runtime_state(state)
 
-    log.info("calendar_cache.json updated — %d events saved (next 14 days).", len(pruned))
+    log.info("calendar_cache.json updated — %d events saved (next 21 days).", len(pruned))
     return True
 
 
