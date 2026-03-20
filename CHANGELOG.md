@@ -2,6 +2,52 @@
 
 ---
 
+## v1.2.5 — 2026-03-20
+
+### 🔴 Root Cause Fix — settings.json Not Deployed to Railway (`.gitignore`)
+
+**Root cause (confirmed from log):**
+```
+Bundled settings.json not found or empty at /app/settings.json
+```
+The `.gitignore` file explicitly excluded `settings.json` with a comment
+saying "The bot will recreate it from settings.json.example on first boot".
+This was wrong — `config_loader.py` reads `settings.json`, not
+`settings.json.example`. As a result, every Railway deployment ran with no
+bundled settings file, fell back to code-level `setdefault()` values, and the
+volume was never updated from the bundle.
+
+This is the underlying cause of every settings-related bug across v1.2.0–v1.2.4.
+
+**Fixes:**
+1. `settings.json` removed from `.gitignore` — it now deploys to Railway.
+2. `config_loader.py` also tries `settings.json.example` as a fallback if
+   `settings.json` is missing, for maximum resilience.
+
+### 🟡 Fix — TP Label in Trade Details String (`signals.py`)
+
+When `tp_mode = "rr_multiple"`, the trade details showed
+`TP=$29.12 (rr_multiple 0.35%)` — the `0.35%` was the raw `tp_pct` value,
+misleading because the TP was not derived from that percentage. Now shows
+`TP=$29.12 (rr_multiple 2.5x RR)`, which accurately reflects how the TP
+was calculated.
+
+### ✅ Bot Status After This Deployment
+
+All settings will correctly sync from `settings.json` on startup:
+- `sl_pct = 0.0025` (0.25% SL) ✅
+- `tp_mode = rr_multiple`, `rr_ratio = 2.5` → TP = SL × 2.5 ✅
+- `max_losing_trades_day = 8` ✅
+- `max_losing_trades_session = 4` ✅
+- `max_trades_day = 20`, `max_trades_london = 10`, `max_trades_us = 10` ✅
+
+Startup log will show:
+```
+Settings synced on startup: RF Scalp v1.2.4 → RF Scalp v1.2.5
+```
+
+---
+
 ## v1.2.4 — 2026-03-20
 
 ### 🔴 Critical Fix — Every Trade Blocked by R:R Check (`signals.py`)

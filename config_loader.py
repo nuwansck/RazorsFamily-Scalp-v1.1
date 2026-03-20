@@ -13,6 +13,7 @@ DATA_DIR = Path(os.environ.get('DATA_DIR', '/data')).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_SETTINGS_PATH = BASE_DIR / 'settings.json'
+EXAMPLE_SETTINGS_PATH = BASE_DIR / 'settings.json.example'  # v1.2.5: fallback
 SETTINGS_FILE = DATA_DIR / 'settings.json'
 SECRETS_JSON_PATH = BASE_DIR / 'secrets.json'
 
@@ -46,14 +47,23 @@ def ensure_persistent_settings() -> Path:
         return SETTINGS_FILE  # already ran this process — skip
 
     # Always read the bundled defaults shipped with the code.
+    # v1.2.5: also try settings.json.example as a fallback in case
+    # settings.json was excluded by .gitignore and not deployed.
     default_settings = _read_json(DEFAULT_SETTINGS_PATH, {})
     if not isinstance(default_settings, dict):
         default_settings = {}
 
-    # v1.2.4 safety: if the bundled settings.json couldn't be read (e.g. path
-    # resolution issue in some Railway container layouts), do NOT overwrite the
-    # volume with an empty dict.  Log a warning and leave the volume as-is so
-    # the bot continues to run with whatever is on the volume.
+    if not default_settings and EXAMPLE_SETTINGS_PATH.exists():
+        logger.warning(
+            'settings.json not found at %s — falling back to settings.json.example.',
+            DEFAULT_SETTINGS_PATH,
+        )
+        default_settings = _read_json(EXAMPLE_SETTINGS_PATH, {})
+        if not isinstance(default_settings, dict):
+            default_settings = {}
+
+    # v1.2.4 safety: if neither file could be read, do NOT overwrite the
+    # volume with an empty dict. Log a warning and leave the volume as-is.
     if not default_settings:
         logger.warning(
             'Bundled settings.json not found or empty at %s — '

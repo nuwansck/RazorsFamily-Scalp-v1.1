@@ -1,11 +1,9 @@
 # Secrets — never commit credentials
 secrets.json
-# settings.json is gitignored so live production settings are never overwritten
-# by a git pull. If this file is already tracked in your repo, untrack it once:
-#   git rm --cached settings.json && git commit -m "chore: untrack settings.json"
-# The bot will recreate it from settings.json.example on first boot via
-# config_loader.ensure_persistent_settings().
-settings.json
+# settings.json is intentionally tracked and deployed.
+# It is the source of truth for all bot configuration on Railway.
+# DO NOT add settings.json to .gitignore — Railway reads it from /app/settings.json.
+# Use settings.json.example as a reference template only.
 
 
 # Runtime data files

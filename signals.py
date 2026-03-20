@@ -330,10 +330,17 @@ class SignalEngine:
         levels["quality_checks"]   = {"tp_ok": True}
         levels["signal_blockers"]  = blockers
 
+        # Build the details label — when tp_mode is rr_multiple, show the
+        # multiplier (e.g. "2.5x RR") instead of the raw tp_pct percentage.
+        _tp_label = (
+            "{:.1f}x RR".format(_rr_ratio)
+            if _tp_mode == "rr_multiple"
+            else "{:.2f}%".format(tp_pct_used * 100)
+        )
         reasons.append(
-            "SL=${:.2f} ({} {:.2f}%) | TP=${:.2f} ({} {:.2f}%) | R:R 1:{:.1f}".format(
+            "SL=${:.2f} ({} {:.2f}%) | TP=${:.2f} ({} {}) | R:R 1:{:.1f}".format(
                 sl_usd_rec, sl_source, sl_pct_used * 100,
-                tp_usd_rec, tp_source, tp_pct_used * 100,
+                tp_usd_rec, tp_source, _tp_label,
                 rr_ratio,
             )
         )
