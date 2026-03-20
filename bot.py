@@ -893,7 +893,7 @@ def _guard_phase(db, run_id, settings, alert, history, now_sgt, today, demo) -> 
                 cooldown_until_sgt=cooldown_started_until.strftime("%H:%M"),
                 session_name=_cd_sess_name,
                 day_losses=_cd_day_losses,
-                day_limit=int(settings.get("max_losing_trades_day", 3)),
+                day_limit=int(settings.get("max_losing_trades_day", 8)),
             ),
         )
         log_event("COOLDOWN_STARTED", f"Cooldown until {cooldown_started_until.strftime('%Y-%m-%d %H:%M:%S')} SGT.", run_id=run_id)

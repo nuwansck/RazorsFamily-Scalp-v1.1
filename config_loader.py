@@ -41,62 +41,30 @@ def ensure_persistent_settings() -> Path:
     if not isinstance(default_settings, dict):
         default_settings = {}
 
+    # v1.2.3 fix: ALWAYS overwrite the volume settings with the bundled
+    # settings.json on every startup.
+    #
+    # Previous approach (sync only when bot_name changes) was fragile:
+    # the first deployment writes the new bot_name to the volume, so all
+    # subsequent restarts see the same bot_name → no sync → stale values
+    # persist indefinitely (confirmed: max_losing_trades_day=3 survived
+    # multiple redeploys because the key already existed in the volume).
+    #
+    # For a Railway bot, the bundled settings.json IS the source of truth.
+    # The volume is for trade state (history, runtime state) — not config.
+    # Operators change settings by editing settings.json and redeploying.
     if SETTINGS_FILE.exists():
-        persistent = _read_json(SETTINGS_FILE, {})
-        if not isinstance(persistent, dict):
-            persistent = {}
+        old_settings = _read_json(SETTINGS_FILE, {})
+        old_name = old_settings.get('bot_name', 'unknown') if isinstance(old_settings, dict) else 'unknown'
+    else:
+        old_name = 'none'
 
-        bundled_bot_name = default_settings.get('bot_name')
-        persistent_bot_name = persistent.get('bot_name')
-
-        if bundled_bot_name and persistent_bot_name != bundled_bot_name:
-            # v1.2.2 fix: new deployment detected (bot_name changed).
-            # Full-sync ALL values from bundled defaults so updated caps,
-            # sl_pct, exhaustion_atr_mult etc. take effect immediately.
-            # Without this, the Railway volume retains stale values forever
-            # because the old merge only injected *missing* keys.
-            persistent.update(default_settings)
-            _write_json(SETTINGS_FILE, persistent)
-            logger.info(
-                'New deployment detected (%s → %s) — full-synced all settings '
-                'from bundled defaults.',
-                persistent_bot_name, bundled_bot_name,
-            )
-        else:
-            # Same version — only inject keys that are genuinely new/missing
-            # so any manual operator edits in the volume file are preserved.
-            new_keys = {k: v for k, v in default_settings.items() if k not in persistent}
-            if new_keys:
-                persistent.update(new_keys)
-                _write_json(SETTINGS_FILE, persistent)
-                logger.info(
-                    'Injected %d new key(s) into persistent settings: %s',
-                    len(new_keys), list(new_keys.keys()),
-                )
-        return SETTINGS_FILE
-
-    # First boot — bootstrap the persistent file from bundled defaults.
-    default_settings.setdefault('bot_name', 'RF Scalp Bot')
-    default_settings.setdefault('cycle_minutes', 5)
-    default_settings.setdefault('db_retention_days', 90)
-    default_settings.setdefault('db_cleanup_hour_sgt', 0)
-    default_settings.setdefault('db_cleanup_minute_sgt', 15)
-    default_settings.setdefault('db_vacuum_weekly', True)
-    default_settings.setdefault('calendar_fetch_interval_min', 60)
-    default_settings.setdefault('calendar_retry_after_min', 15)
-    # Always ensure the keys that validate_settings() requires are present
-    # so the bot starts cleanly even when the bundled settings.json is stale.
-    default_settings.setdefault('spread_limits', {'London': 130, 'US': 130})
-    default_settings.setdefault('max_trades_day', 20)
-    default_settings.setdefault('max_losing_trades_day', 8)
-    default_settings.setdefault('max_trades_london', 10)
-    default_settings.setdefault('max_trades_us', 10)
-    default_settings.setdefault('max_losing_trades_session', 4)
-    default_settings.setdefault('sl_mode', 'pct_based')
-    default_settings.setdefault('tp_mode', 'rr_multiple')
-    default_settings.setdefault('rr_ratio', 2.5)
     _write_json(SETTINGS_FILE, default_settings)
-    logger.info('Bootstrapped persistent settings -> %s', SETTINGS_FILE)
+    new_name = default_settings.get('bot_name', 'unknown')
+    if old_name != new_name:
+        logger.info('Settings synced on startup: %s → %s', old_name, new_name)
+    else:
+        logger.info('Settings synced on startup: %s (refreshed from bundle)', new_name)
     return SETTINGS_FILE
 
 

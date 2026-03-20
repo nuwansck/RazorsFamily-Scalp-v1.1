@@ -249,9 +249,9 @@ def main():
             _alert.send(msg_startup(
                 _version, _mode, _balance, _threshold,
                 cycle_minutes=int(settings.get('cycle_minutes', 5)),
-                max_trades_london=int(settings.get('max_trades_london', 4)),
-                max_trades_us=int(settings.get('max_trades_us', 4)),
-                max_losing_day=int(settings.get('max_losing_trades_day', 3)),
+                max_trades_london=int(settings.get('max_trades_london', 10)),
+                max_trades_us=int(settings.get('max_trades_us', 10)),
+                max_losing_day=int(settings.get('max_losing_trades_day', 8)),
                 trading_day_start_hour=int(settings.get('trading_day_start_hour_sgt', 8)),
             ))
             _state["last_startup_ts"] = _now_ts

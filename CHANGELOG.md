@@ -2,6 +2,41 @@
 
 ---
 
+## v1.2.3 — 2026-03-20
+
+### 🔴 Bug Fix — Volume Settings Never Actually Updated on Railway (`config_loader.py`)
+
+**Root cause (the real one):** v1.2.2 introduced a full-sync that fired when
+`bot_name` changed between the volume file and the bundled `settings.json`.
+This worked exactly once — the first boot wrote the new `bot_name` to the
+volume. Every subsequent restart saw the same `bot_name` → no sync → the
+volume file kept all stale values (`max_losing_trades_day=3`, `sl_pct=0.0015`
+etc.) permanently.
+
+**Confirmed from logs:** `Daily loss cap hit (3/3)` appeared on the SECOND
+start of v1.2.2 (first start wrote new bot_name, second start skipped sync),
+and every restart since.
+
+**Fix:** `ensure_persistent_settings()` now **unconditionally overwrites** the
+volume `/data/settings.json` with the bundled `settings.json` on every startup.
+The Railway volume stores trade state (history, runtime state, ORB cache) —
+not configuration. Configuration lives in the bundled file under version
+control. Redeploy to change settings, not manual volume edits.
+
+The old dead first-boot `setdefault` block was also removed.
+
+### 🔴 Bug Fix — Stale Fallback `=3` in Cooldown Alert (`bot.py`)
+
+`msg_cooldown_started()` was called with `day_limit=settings.get("max_losing_trades_day", 3)`.
+Updated fallback to `8`.
+
+### 🟡 Bug Fix — Stale Fallbacks in Startup Telegram (`scheduler.py`)
+
+`msg_startup()` was called with `max_trades_london=4`, `max_trades_us=4`,
+`max_losing_day=3` as hardcoded fallbacks. Updated to `10`, `10`, `8`.
+
+---
+
 ## v1.2.2 — 2026-03-20
 
 ### 🔴 Bug Fix — Railway Volume Ignoring Updated Settings (`config_loader.py`)
