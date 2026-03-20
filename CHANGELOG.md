@@ -2,6 +2,61 @@
 
 ---
 
+## v1.2.2 — 2026-03-20
+
+### 🔴 Bug Fix — Railway Volume Ignoring Updated Settings (`config_loader.py`)
+
+**Root cause (confirmed from logs):** Railway persists `/data/settings.json` on
+a volume across deployments. The previous merge logic in `ensure_persistent_settings()`
+only injected **missing** keys from the bundled `settings.json`. Any key that
+already existed in the volume kept its old value forever — meaning `sl_pct`,
+`max_losing_trades_day`, `max_losing_trades_session` and all other keys from
+earlier versions were **silently ignored** on every redeploy.
+
+**Evidence from log:** Every trade showed `sl_pct_used: 0.0015` (old value)
+despite `settings.json` having `0.0025`. The daily cap fired at `3/3` losses
+(old value) despite settings showing `8`.
+
+**Fix:** When `bot_name` changes between the volume file and the bundled
+defaults (i.e. a new deployment), all values are now **fully synced** from the
+bundled file. Same-version restarts still only inject missing keys so manual
+operator edits are preserved.
+
+### 🔴 Bug Fix — Stale Hardcoded Fallback Defaults (`config_loader.py`, `bot.py`)
+
+Both files had `setdefault()` calls with old v1.0/v1.1 values:
+
+| Key | Old fallback | New fallback |
+|---|---|---|
+| `sl_pct` | `0.0015` | `0.0025` |
+| `sl_max_usd` | `8.0` | `15.0` |
+| `exhaustion_atr_mult` | `2.0` | `3.0` |
+| `max_losing_trades_session` | `2` | `4` |
+| `max_losing_trades_day` | `3` | `8` |
+| `max_trades_day` | `8` | `20` |
+| `max_trades_london` | `4` | `10` |
+| `max_trades_us` | `4` | `10` |
+| `rr_ratio` | `3.0` | `2.5` |
+
+These shadowed the correct values for any key that might be absent from the
+loaded settings dict, acting as a second layer of stale defaults.
+
+### 🔴 Bug Fix — SL Re-entry Gap Missed Same-Cycle Closures (`bot.py`)
+
+**Root cause:** The 5-minute SL re-entry gap check ran **before** the OANDA
+login, but `backfill_pnl()` — which writes `last_sl_closed_at_sgt` to runtime
+state — runs **after** login. So in the cycle where a SL closes, the state
+isn't written yet when the gap check runs, the check passes, and a new trade
+fires immediately in the same cycle.
+
+**Evidence from log:** Trade 481 closed via SL at 17:53:52 SGT. Trade 487
+was placed at 17:53:54 SGT — 2 seconds later in the same cycle.
+
+**Fix:** SL re-entry gap check moved to after `backfill_pnl()` in the
+post-login section, so it always sees the current cycle's SL closure.
+
+---
+
 ## v1.2.1 — 2026-03-20
 
 ### Cap Tuning for Scalp-Frequency Trading (`settings.json`)

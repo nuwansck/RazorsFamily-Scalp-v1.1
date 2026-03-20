@@ -42,29 +42,37 @@ def ensure_persistent_settings() -> Path:
         default_settings = {}
 
     if SETTINGS_FILE.exists():
-        # Merge: inject any keys present in the bundled defaults that are
-        # missing from the persistent volume file (e.g. after a deployment
-        # that adds new settings keys).
         persistent = _read_json(SETTINGS_FILE, {})
         if not isinstance(persistent, dict):
             persistent = {}
-        new_keys = {k: v for k, v in default_settings.items() if k not in persistent}
-        changed = dict(new_keys)
 
-        # bot_name is a version indicator — always sync it from the bundled
-        # defaults so a redeployment automatically updates the displayed
-        # version string without requiring the user to edit the volume file.
         bundled_bot_name = default_settings.get('bot_name')
-        if bundled_bot_name and persistent.get('bot_name') != bundled_bot_name:
-            changed['bot_name'] = bundled_bot_name
+        persistent_bot_name = persistent.get('bot_name')
 
-        if changed:
-            persistent.update(changed)
+        if bundled_bot_name and persistent_bot_name != bundled_bot_name:
+            # v1.2.2 fix: new deployment detected (bot_name changed).
+            # Full-sync ALL values from bundled defaults so updated caps,
+            # sl_pct, exhaustion_atr_mult etc. take effect immediately.
+            # Without this, the Railway volume retains stale values forever
+            # because the old merge only injected *missing* keys.
+            persistent.update(default_settings)
             _write_json(SETTINGS_FILE, persistent)
             logger.info(
-                'Updated %d key(s) in persistent settings: %s',
-                len(changed), list(changed.keys()),
+                'New deployment detected (%s → %s) — full-synced all settings '
+                'from bundled defaults.',
+                persistent_bot_name, bundled_bot_name,
             )
+        else:
+            # Same version — only inject keys that are genuinely new/missing
+            # so any manual operator edits in the volume file are preserved.
+            new_keys = {k: v for k, v in default_settings.items() if k not in persistent}
+            if new_keys:
+                persistent.update(new_keys)
+                _write_json(SETTINGS_FILE, persistent)
+                logger.info(
+                    'Injected %d new key(s) into persistent settings: %s',
+                    len(new_keys), list(new_keys.keys()),
+                )
         return SETTINGS_FILE
 
     # First boot — bootstrap the persistent file from bundled defaults.
@@ -79,11 +87,14 @@ def ensure_persistent_settings() -> Path:
     # Always ensure the keys that validate_settings() requires are present
     # so the bot starts cleanly even when the bundled settings.json is stale.
     default_settings.setdefault('spread_limits', {'London': 130, 'US': 130})
-    default_settings.setdefault('max_trades_day', 8)
-    default_settings.setdefault('max_losing_trades_day', 3)
+    default_settings.setdefault('max_trades_day', 20)
+    default_settings.setdefault('max_losing_trades_day', 8)
+    default_settings.setdefault('max_trades_london', 10)
+    default_settings.setdefault('max_trades_us', 10)
+    default_settings.setdefault('max_losing_trades_session', 4)
     default_settings.setdefault('sl_mode', 'pct_based')
     default_settings.setdefault('tp_mode', 'rr_multiple')
-    default_settings.setdefault('rr_ratio', 3.0)
+    default_settings.setdefault('rr_ratio', 2.5)
     _write_json(SETTINGS_FILE, default_settings)
     logger.info('Bootstrapped persistent settings -> %s', SETTINGS_FILE)
     return SETTINGS_FILE
@@ -132,11 +143,14 @@ def load_settings() -> dict:
     # crashes with "Missing required settings keys" regardless of how old the
     # volume's settings.json is.
     settings.setdefault('spread_limits', {'London': 130, 'US': 130})
-    settings.setdefault('max_trades_day', 8)
-    settings.setdefault('max_losing_trades_day', 3)
+    settings.setdefault('max_trades_day', 20)
+    settings.setdefault('max_losing_trades_day', 8)
+    settings.setdefault('max_trades_london', 10)
+    settings.setdefault('max_trades_us', 10)
+    settings.setdefault('max_losing_trades_session', 4)
     settings.setdefault('sl_mode', 'pct_based')
     settings.setdefault('tp_mode', 'rr_multiple')
-    settings.setdefault('rr_ratio', 3.0)
+    settings.setdefault('rr_ratio', 2.5)
 
     if set(settings.keys()) != original_keys:
         _write_json(SETTINGS_FILE, settings)

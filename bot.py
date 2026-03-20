@@ -160,16 +160,16 @@ def validate_settings(settings: dict) -> dict:
     settings.setdefault("position_partial_usd",         66)
     settings.setdefault("account_balance_override",     0)
     settings.setdefault("enabled",                      True)
-    settings.setdefault("atr_sl_multiplier",            0.3)    # scalp: tighter ATR mult
-    settings.setdefault("sl_min_usd",                   2.0)    # scalp: tighter floor
-    settings.setdefault("sl_max_usd",                   8.0)    # scalp: tighter ceiling
+    settings.setdefault("atr_sl_multiplier",            0.3)
+    settings.setdefault("sl_min_usd",                   2.0)
+    settings.setdefault("sl_max_usd",                   15.0)   # v1.2.2: widened ceiling
     settings.setdefault("fixed_sl_usd",                 5.0)
     settings.setdefault("breakeven_trigger_usd",        5.0)
-    settings.setdefault("trading_day_start_hour_sgt",   8)   # v1.0: day resets at 08:00 SGT
-    settings.setdefault("max_losing_trades_session",    2)   # v1.0: per-session sub-cap
-    settings.setdefault("exhaustion_atr_mult",          2.0) # v1.0: trend exhaustion threshold
-    settings.setdefault("sl_pct",                  0.0015)  # scalp: 0.15% SL
-    settings.setdefault("tp_pct",                  0.0035)  # scalp: 0.35% TP
+    settings.setdefault("trading_day_start_hour_sgt",   8)
+    settings.setdefault("max_losing_trades_session",    4)    # v1.2.2: updated cap
+    settings.setdefault("exhaustion_atr_mult",          3.0)  # v1.2.2: raised threshold
+    settings.setdefault("sl_pct",                  0.0025)  # v1.2.2: 0.25% SL (was 0.15%)
+    settings.setdefault("tp_pct",                  0.0035)
     settings.setdefault("margin_safety_factor",     0.6)
     settings.setdefault("margin_retry_safety_factor", 0.4)
     settings.setdefault("xau_margin_rate_override",  0.05)
@@ -1076,7 +1076,7 @@ def _guard_phase(db, run_id, settings, alert, history, now_sgt, today, demo) -> 
 
     # Per-session loss sub-cap
     if macro:
-        _sess_loss_cap = int(settings.get("max_losing_trades_session", 2))
+        _sess_loss_cap = int(settings.get("max_losing_trades_session", 4))
         _sess_losses   = session_losses(history, today, macro)
         if _sess_loss_cap > 0 and _sess_losses >= _sess_loss_cap:
             msg = (
@@ -1101,30 +1101,6 @@ def _guard_phase(db, run_id, settings, alert, history, now_sgt, today, demo) -> 
                                                                  "losses": _sess_losses,
                                                                  "cap": _sess_loss_cap})
             return None
-
-    # Single-candle SL re-entry gap
-    _sl_gap_min = int(settings.get("sl_reentry_gap_min", 5))
-    if _sl_gap_min > 0:
-        _last_sl_at = load_json(RUNTIME_STATE_FILE, {}).get("last_sl_closed_at_sgt")
-        if _last_sl_at:
-            _last_sl_dt = _parse_sgt_timestamp(_last_sl_at)
-            if _last_sl_dt and (now_sgt - _last_sl_dt).total_seconds() < _sl_gap_min * 60:
-                _remaining_sl = max(1, int((_sl_gap_min * 60 - (now_sgt - _last_sl_dt).total_seconds()) // 60))
-                msg = f"⏳ SL cooldown — waiting {_remaining_sl} more min before next entry."
-                send_once_per_state(
-                    alert, ops, "sl_reentry_state",
-                    f"sl_gap:{_last_sl_at}", msg,
-                )
-                log.info(
-                    "SL re-entry gap active (last SL at %s, gap=%dmin) — skipping.",
-                    _last_sl_at, _sl_gap_min, extra={"run_id": run_id},
-                )
-                update_runtime_state(
-                    last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"),
-                    status="SKIPPED_SL_REENTRY_GAP",
-                )
-                db.finish_cycle(run_id, status="SKIPPED", summary={"stage": "sl_reentry_gap"})
-                return None
 
     # ── Lazy OandaTrader construction + circuit breaker ───────────────────────
     # Constructed after all pre-login cap guards so capped/cooldown days never
@@ -1176,6 +1152,33 @@ def _guard_phase(db, run_id, settings, alert, history, now_sgt, today, demo) -> 
     history[:] = backfill_pnl(history, trader, alert, settings)
     if settings.get("breakeven_enabled", False):
         check_breakeven(history, trader, alert, settings)
+
+    # ── SL re-entry gap (post-backfill) ───────────────────────────────────────
+    # MUST run after backfill_pnl — that's where last_sl_closed_at_sgt is
+    # written. Placing this check pre-login missed same-cycle SL closures
+    # because the state wasn't recorded until backfill ran.
+    _sl_gap_min = int(settings.get("sl_reentry_gap_min", 5))
+    if _sl_gap_min > 0:
+        _last_sl_at = load_json(RUNTIME_STATE_FILE, {}).get("last_sl_closed_at_sgt")
+        if _last_sl_at:
+            _last_sl_dt = _parse_sgt_timestamp(_last_sl_at)
+            if _last_sl_dt and (now_sgt - _last_sl_dt).total_seconds() < _sl_gap_min * 60:
+                _remaining_sl = max(1, int((_sl_gap_min * 60 - (now_sgt - _last_sl_dt).total_seconds()) // 60))
+                msg = f"⏳ SL cooldown — waiting {_remaining_sl} more min before next entry."
+                send_once_per_state(
+                    alert, ops, "sl_reentry_state",
+                    f"sl_gap:{_last_sl_at}", msg,
+                )
+                log.info(
+                    "SL re-entry gap active (last SL at %s, gap=%dmin) — skipping.",
+                    _last_sl_at, _sl_gap_min, extra={"run_id": run_id},
+                )
+                update_runtime_state(
+                    last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"),
+                    status="SKIPPED_SL_REENTRY_GAP",
+                )
+                db.finish_cycle(run_id, status="SKIPPED", summary={"stage": "sl_reentry_gap"})
+                return None
 
     # Post-login guards: these need an active trader connection.
     # daily_totals here includes unrealized P&L from any open position so the
